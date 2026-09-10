@@ -57,14 +57,8 @@
   <div class="card">
     <h2>GitHub 연결</h2>
     <p class="sub">토큰은 저장하지 않아요. 새로고침하면 다시 입력해야 해요.</p>
-    <div class="row2">
-      <div><label>사용자명 / 조직명</label><input type="text" id="owner"></div>
-      <div><label>리포지토리 이름</label><input type="text" id="repo"></div>
-    </div>
     <label>개인 액세스 토큰 (Contents: Read and write)</label>
     <input type="password" id="token" placeholder="github_pat_...">
-    <label>브랜치</label>
-    <input type="text" id="branch" value="main">
   </div>
 
   <div class="card">
@@ -111,12 +105,16 @@
 
 <script>
 // ---------- github helpers ----------
+const GH_OWNER = 'asteo-pt';
+const GH_REPO = 'AADsystem';
+const GH_BRANCH = 'main';
+
 function creds(){
   return {
-    owner: document.getElementById('owner').value.trim(),
-    repo: document.getElementById('repo').value.trim(),
+    owner: GH_OWNER,
+    repo: GH_REPO,
     token: document.getElementById('token').value.trim(),
-    branch: document.getElementById('branch').value.trim() || 'main'
+    branch: GH_BRANCH
   };
 }
 
@@ -222,7 +220,7 @@ function updateCounts(){
 // 기존 사진 불러오기 (리포 → 임베딩만 추출, 재업로드 안 함)
 document.getElementById('btnFetchExisting').onclick = async ()=>{
   const { owner, repo, token, branch } = creds();
-  if(!owner || !repo || !token){ regStatus.textContent = 'GitHub 연결 정보를 먼저 입력해주세요.'; return; }
+  if(!token){ regStatus.textContent = '토큰을 먼저 입력해주세요.'; return; }
   await ensureMobilenet(regStatus);
   regProgressTrack.style.display = 'block';
 
@@ -249,7 +247,7 @@ document.getElementById('btnFetchExisting').onclick = async ()=>{
 // 새 사진 추가 (리사이즈 → GitHub 업로드 → 임베딩도 같이 저장)
 async function addNewFiles(fileList, cls, folder){
   const { owner, repo, token, branch } = creds();
-  if(!owner || !repo || !token){ regStatus.textContent = 'GitHub 연결 정보를 먼저 입력해주세요.'; return; }
+  if(!token){ regStatus.textContent = '토큰을 먼저 입력해주세요.'; return; }
   await ensureMobilenet(regStatus);
   const files = Array.from(fileList);
   const maxDim = parseInt(document.getElementById('maxDim').value,10) || 800;
@@ -335,7 +333,7 @@ function arrayBufferToBase64(buf){
 
 document.getElementById('btnDeploy').onclick = async ()=>{
   const { owner, repo, token, branch } = creds();
-  if(!owner || !repo || !token){ document.getElementById('deployStatus').textContent = 'GitHub 연결 정보를 먼저 입력해주세요.'; return; }
+  if(!token){ document.getElementById('deployStatus').textContent = '토큰을 먼저 입력해주세요.'; return; }
   const deployStatus = document.getElementById('deployStatus');
   const deployProgressTrack = document.getElementById('deployProgressTrack');
   deployProgressTrack.style.display = 'block';
