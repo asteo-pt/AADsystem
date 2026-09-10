@@ -36,8 +36,12 @@
   .verdict{ display:flex; align-items:baseline; gap:14px; margin-bottom:8px; flex-wrap:wrap; }
   .verdict .pct{ font-family:'Fraunces',serif; font-size:52px; font-weight:500; }
   .verdict .pct-label{ opacity:.75; font-size:14px; }
-  .result-row{ display:flex; align-items:center; gap:12px; padding:10px 0; border-top:1px solid var(--line); }
-  .result-row:first-child{ border-top:none; }
+  .result-row{ display:flex; align-items:center; gap:12px; padding:10px 0 4px; }
+  .result-block{ border-top:1px solid var(--line); padding-top:10px; margin-top:10px; }
+  .result-block:first-child{ border-top:none; margin-top:0; padding-top:0; }
+  .result-breakdown{ padding:6px 0 6px 56px; }
+  .result-breakdown .feature{ margin-bottom:10px; }
+  .result-breakdown .flabel{ font-size:11.5px; }
   .result-thumb{ width:44px; height:44px; object-fit:cover; border:1px solid var(--line); flex-shrink:0; }
   .result-name{ flex:1; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .result-pct{ font-family:'Fraunces',serif; font-size:18px; min-width:60px; text-align:right; }
@@ -264,7 +268,7 @@ btnRun.onclick = async ()=>{
     const pred = headModel.predict(x);
     const [pReal, pAi] = await pred.data();
     x.dispose(); pred.dispose();
-    const heur = testFiles.length === 1 ? extractHeuristicFeatures(img) : null;
+    const heur = extractHeuristicFeatures(img);
     scored.push({ name:file.name, url:URL.createObjectURL(file), pAi, heur });
     progressFill.style.width = Math.round(((i+1)/testFiles.length)*100)+'%';
     runStatus.textContent = `판별 중... ${i+1}/${testFiles.length}`;
@@ -295,10 +299,25 @@ btnRun.onclick = async ()=>{
   } else {
     scored.sort((a,b)=> b.pAi-a.pAi);
     scored.forEach(r=>{
-      const row = document.createElement('div');
-      row.className = 'result-row';
-      row.innerHTML = `<img class="result-thumb" src="${r.url}"><div class="result-name">${r.name}</div><div class="result-pct">${(r.pAi*100).toFixed(0)}%</div><div class="result-label">${r.pAi>=0.5?'AI 쪽':'실제 쪽'}</div>`;
-      resultList.appendChild(row);
+      const wrap = document.createElement('div');
+      wrap.className = 'result-block';
+      const breakdown = heuristicBreakdown(r.heur) || [];
+      const bars = breakdown.map(b=>`
+        <div class="feature">
+          <div class="flabel"><span class="name">${b.name}</span><span>${b.lean.toFixed(0)}% AI쪽</span></div>
+          <div class="bar-track"><div class="bar-fill" style="width:${b.lean}%"></div></div>
+        </div>
+      `).join('');
+      wrap.innerHTML = `
+        <div class="result-row">
+          <img class="result-thumb" src="${r.url}">
+          <div class="result-name">${r.name}</div>
+          <div class="result-pct">${(r.pAi*100).toFixed(0)}%</div>
+          <div class="result-label">${r.pAi>=0.5?'AI 쪽':'실제 쪽'}</div>
+        </div>
+        <div class="result-breakdown">${bars}</div>
+      `;
+      resultList.appendChild(wrap);
     });
   }
   results.scrollIntoView({behavior:'smooth', block:'start'});
