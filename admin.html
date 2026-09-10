@@ -192,6 +192,93 @@ async function embedImgEl(imgEl){
   return Array.from(arr);
 }
 
+// 항목별(노이즈/색감/별패턴/디테일) 해석용 보조 특징 — 학습된 신경망과는 별개로
+// "왜 그렇게 판단했는지" 참고용 수치를 만들기 위한 통계 기반 특징
+const HEURISTIC_NAMES = ['노이즈(배경 그레인)', '색감(채도)', '별 패턴 대칭성', '디테일(에지 선명도)', '패턴노이즈(고주파 잔차)'];
+function extractHeuristicFeatures(imgEl){
+  const SIZE = 220;
+  const cv = document.createElement('canvas');
+  cv.width = SIZE; cv.height = SIZE;
+  const ctx = cv.getContext('2d');
+  const s = Math.max(SIZE/imgEl.width, SIZE/imgEl.height);
+  const w = imgEl.width*s, h = imgEl.height*s;
+  ctx.drawImage(imgEl, (SIZE-w)/2, (SIZE-h)/2, w, h);
+  const data = ctx.getImageData(0,0,SIZE,SIZE).data;
+  const n = SIZE*SIZE;
+  const gray = new Float32Array(n), sat = new Float32Array(n);
+  for(let i=0;i<n;i++){
+    const r=data[i*4], g=data[i*4+1], b=data[i*4+2];
+    const mx=Math.max(r,g,b), mn=Math.min(r,g,b);
+    gray[i] = 0.299*r+0.587*g+0.114*b;
+    sat[i] = mx===0 ? 0 : (mx-mn)/mx;
+  }
+  let bgSum=0,bgSqSum=0,bgN=0,brightSatSum=0,brightN=0;
+  const threshold=60;
+  for(let i=0;i<n;i++){
+    if(gray[i]<threshold){ bgSum+=gray[i]; bgSqSum+=gray[i]*gray[i]; bgN++; }
+    else { brightSatSum+=sat[i]; brightN++; }
+  }
+  const bgMean = bgN? bgSum/bgN : 0;
+  const bgVar = bgN? (bgSqSum/bgN - bgMean*bgMean) : 0;
+  const noiseScore = Math.sqrt(Math.max(bgVar,0));
+  const colorScore = brightN ? brightSatSum/brightN : 0;
+
+  let edgeSum=0, edgeN=0;
+  const gxK=[-1,0,1,-2,0,2,-1,0,1], gyK=[-1,-2,-1,0,0,0,1,2,1];
+  for(let y=1;y<SIZE-1;y++){
+    for(let x=1;x<SIZE-1;x++){
+      let gx=0,gy=0,k=0;
+      for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+        const v = gray[(y+dy)*SIZE+(x+dx)]; gx+=v*gxK[k]; gy+=v*gyK[k]; k++;
+      }
+      const mag = Math.sqrt(gx*gx+gy*gy);
+      if(gray[y*SIZE+x] > threshold){ edgeSum+=mag; edgeN++; }
+    }
+  }
+  const detailScore = edgeN ? edgeSum/edgeN : 0;
+
+  let symSum=0, symN=0; const R=4;
+  for(let y=R+1;y<SIZE-R-1 && symN<=40;y+=2){
+    for(let x=R+1;x<SIZE-R-1 && symN<=40;x+=2){
+      const v = gray[y*SIZE+x];
+      if(v<200) continue;
+      let isPeak=true;
+      for(let dy=-1;dy<=1&&isPeak;dy++) for(let dx=-1;dx<=1;dx++){
+        if(dx===0&&dy===0) continue;
+        if(gray[(y+dy)*SIZE+(x+dx)]>v){ isPeak=false; break; }
+      }
+      if(!isPeak) continue;
+      const a=gray[y*SIZE+(x-R)], b2=gray[y*SIZE+(x+R)];
+      const c1=gray[(y-R)*SIZE+x], d1=gray[(y+R)*SIZE+x];
+      const sym = 1 - Math.min(1,(Math.abs(a-b2)+Math.abs(c1-d1))/2/255);
+      symSum+=sym; symN++;
+    }
+  }
+  const starScore = symN ? symSum/symN : 0.5;
+
+  // 패턴노이즈(고주파 잔차): 3x3 박스블러한 버전과 원본을 픽셀별로 빼서
+  // 남는 고주파 성분의 표준편차를 봄 — 포렌식 이미지 분석에서 쓰는 잔차 노이즈 기법
+  const blurred = new Float32Array(n);
+  for(let y=0;y<SIZE;y++){
+    for(let x=0;x<SIZE;x++){
+      let sum=0, cnt=0;
+      for(let dy=-1;dy<=1;dy++){
+        for(let dx=-1;dx<=1;dx++){
+          const yy=y+dy, xx=x+dx;
+          if(yy>=0&&yy<SIZE&&xx>=0&&xx<SIZE){ sum+=gray[yy*SIZE+xx]; cnt++; }
+        }
+      }
+      blurred[y*SIZE+x] = sum/cnt;
+    }
+  }
+  let resSum=0, resSqSum=0;
+  for(let i=0;i<n;i++){ const d = gray[i]-blurred[i]; resSum+=d; resSqSum+=d*d; }
+  const resMean = resSum/n;
+  const patternNoise = Math.sqrt(Math.max(resSqSum/n - resMean*resMean, 0));
+
+  return [noiseScore/60, colorScore, starScore, detailScore/80, patternNoise/12];
+}
+
 // ---------- state ----------
 let refs = { real: [], ai: [] }; // {embedding:number[]}
 
@@ -231,7 +318,8 @@ document.getElementById('btnFetchExisting').onclick = async ()=>{
       try{
         const img = await loadImageFromUrl(imgFiles[i].download_url);
         const emb = await embedImgEl(img);
-        refs[cls].push({ embedding: emb });
+        const heur = extractHeuristicFeatures(img);
+        refs[cls].push({ embedding: emb, heuristic: heur });
         logLine(regLog, `불러옴: ${folder}/${imgFiles[i].name}`);
       }catch(err){
         logLine(regLog, `실패: ${folder}/${imgFiles[i].name} — ${err.message}`, true);
@@ -260,9 +348,10 @@ async function addNewFiles(fileList, cls, folder){
       const img = await loadImageFile(file);
       const { base64, canvasImg } = resizeToJpegBase64(img, maxDim, quality);
       const emb = await embedImgEl(canvasImg);
+      const heur = extractHeuristicFeatures(canvasImg);
       const path = `${folder}/${Date.now()}_${sanitizeName(file.name)}`;
       await ghPutFile(owner, repo, path, base64, token, branch, null);
-      refs[cls].push({ embedding: emb });
+      refs[cls].push({ embedding: emb, heuristic: heur });
       logLine(regLog, `업로드: ${path}`);
     }catch(err){
       logLine(regLog, `실패: ${file.name} — ${err.message}`, true);
@@ -335,6 +424,25 @@ btnTrain.onclick = async ()=>{
   trainProgressTrack.style.display = 'none';
   xTensor.dispose(); yTensor.dispose();
   trainStatus.textContent += '\n학습 완료.';
+
+  // 항목별(노이즈/색감/별패턴/디테일) 비교용 통계 — 실제/AI 기준 사진들의 평균과
+  // 정규화용 min/max를 계산해서 배포 시 같이 올림
+  const allHeur = refs.real.map(r=>r.heuristic).concat(refs.ai.map(r=>r.heuristic));
+  const dims = allHeur[0].length;
+  const hMin = new Array(dims).fill(Infinity), hMax = new Array(dims).fill(-Infinity);
+  allHeur.forEach(v=> v.forEach((x,i)=>{ if(x<hMin[i]) hMin[i]=x; if(x>hMax[i]) hMax[i]=x; }));
+  function meanVec(vecs){
+    const out = new Array(dims).fill(0);
+    vecs.forEach(v=> v.forEach((x,i)=> out[i]+=x));
+    return out.map(x=> x/vecs.length);
+  }
+  window._featureStats = {
+    names: HEURISTIC_NAMES,
+    realMean: meanVec(refs.real.map(r=>r.heuristic)),
+    aiMean: meanVec(refs.ai.map(r=>r.heuristic)),
+    min: hMin, max: hMax
+  };
+
   document.getElementById('btnDeploy').disabled = false;
 };
 
@@ -378,6 +486,11 @@ document.getElementById('btnDeploy').onclick = async ()=>{
     deployStatus.textContent = 'weights.bin 업로드 중...';
     const shaBin = await ghGetSha(owner, repo, 'model/weights.bin', token, branch);
     await ghPutFile(owner, repo, 'model/weights.bin', weightsBase64, token, branch, shaBin);
+
+    deployStatus.textContent = 'feature_stats.json 업로드 중...';
+    const statsBase64 = btoa(unescape(encodeURIComponent(JSON.stringify(window._featureStats))));
+    const shaStats = await ghGetSha(owner, repo, 'model/feature_stats.json', token, branch);
+    await ghPutFile(owner, repo, 'model/feature_stats.json', statsBase64, token, branch, shaStats);
 
     deployProgressTrack.style.display = 'none';
     deployStatus.textContent = '배포 완료 — 공개 판별기가 이제 이 모델을 사용해요.';
