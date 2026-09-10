@@ -129,7 +129,7 @@ async function ghListDir(owner, repo, path, token, branch){
   if(res.status !== 200) return [];
   return await res.json(); // array of {name, download_url, ...}
 }
-async function ghPutFile(owner, repo, path, base64, token, branch, sha){
+async function ghPutFile(owner, repo, path, base64, token, branch, sha, retry){
   const body = { message: `update ${path}`, content: base64, branch };
   if(sha) body.sha = sha;
   const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`, {
@@ -137,6 +137,11 @@ async function ghPutFile(owner, repo, path, base64, token, branch, sha){
     headers:{ Authorization:`token ${token}`, Accept:'application/vnd.github+json', 'Content-Type':'application/json' },
     body: JSON.stringify(body)
   });
+  if(res.status === 409 && !retry){
+    // 파일이 그 사이 바뀐 경우(sha 충돌) — 최신 sha 다시 받아서 한 번만 재시도
+    const freshSha = await ghGetSha(owner, repo, path, token, branch);
+    return ghPutFile(owner, repo, path, base64, token, branch, freshSha, true);
+  }
   if(!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0,200)}`);
 }
 
