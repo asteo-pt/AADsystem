@@ -133,7 +133,7 @@ async function embedImage(img){
 // 관리자가 배포한 기준 통계와 비교해서 항목별로 어느 쪽에 가까운지 보여줌
 let featureStats = null;
 function extractHeuristicFeatures(imgEl){
-  const SIZE = 220;
+  const SIZE = 512;
   const cv = document.createElement('canvas');
   cv.width = SIZE; cv.height = SIZE;
   const ctx = cv.getContext('2d');
