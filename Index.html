@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>천체사진 감별기</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js"></script>
+<style>
+  :root{ --bg:#000; --panel:#000; --panel-2:#1A1A1A; --line:#FFF; --text:#FFF; --muted:#FFF; }
+  *{box-sizing:border-box;}
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:'Inter',sans-serif; line-height:1.5; position:relative; overflow-x:hidden; }
+  #stars{ position:fixed; inset:0; z-index:0; pointer-events:none; }
+  .wrap{ position:relative; z-index:1; max-width:840px; margin:0 auto; padding:56px 24px 96px; }
+  header{ margin-bottom:48px; }
+  h1{ font-family:'Fraunces',serif; font-weight:500; font-size:clamp(28px,5vw,40px); margin:0; letter-spacing:-0.01em; }
+  .card{ background:var(--panel); border:1px solid var(--line); border-radius:0; padding:28px; margin-bottom:24px; }
+  .card h2{ font-family:'Fraunces',serif; font-weight:500; font-size:19px; margin:0 0 4px; }
+  .card .sub{ opacity:.75; font-size:13.5px; margin:0 0 20px; }
+  .test-dz{ border:1.5px dashed var(--line); border-radius:0; padding:32px 18px; text-align:center; cursor:pointer; }
+  .test-dz:hover{ background:var(--panel-2); }
+  input[type=file]{ display:none; }
+  .row-actions{ display:flex; gap:10px; margin-top:18px; flex-wrap:wrap; }
+  button.btn{
+    font-family:'Inter',sans-serif; background:var(--panel-2); color:var(--text);
+    border:1px solid var(--line); padding:9px 16px; border-radius:0; font-size:13.5px; font-weight:500; cursor:pointer;
+  }
+  button.btn.primary{ background:#FFF; color:#000; font-weight:700; }
+  button.btn:disabled{ opacity:.35; cursor:not-allowed; }
+  .hint{ font-size:12.5px; opacity:.75; margin-top:10px; }
+  .progress-track{ height:6px; background:var(--panel-2); border:1px solid var(--line); margin-top:10px; display:none; }
+  .progress-fill{ height:100%; background:#FFF; width:0%; }
+  #results{ display:none; }
+  .verdict{ display:flex; align-items:baseline; gap:14px; margin-bottom:8px; flex-wrap:wrap; }
+  .verdict .pct{ font-family:'Fraunces',serif; font-size:52px; font-weight:500; }
+  .verdict .pct-label{ opacity:.75; font-size:14px; }
+  .result-row{ display:flex; align-items:center; gap:12px; padding:10px 0; border-top:1px solid var(--line); }
+  .result-row:first-child{ border-top:none; }
+  .result-thumb{ width:44px; height:44px; object-fit:cover; border:1px solid var(--line); flex-shrink:0; }
+  .result-name{ flex:1; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .result-pct{ font-family:'Fraunces',serif; font-size:18px; min-width:60px; text-align:right; }
+  .result-label{ font-size:11.5px; opacity:.75; min-width:64px; text-align:right; }
+  footer{ opacity:.6; font-size:12px; margin-top:36px; max-width:560px; }
+</style>
+</head>
+<body>
+<canvas id="stars"></canvas>
+<div class="wrap">
+  <header><h1>천체사진 감별기</h1></header>
+
+  <div class="card" id="modelCard">
+    <h2>사진 판별하기</h2>
+    <p class="sub" id="modelStatus">모델 불러오는 중...</p>
+    <div class="test-dz" id="dzTest">
+      <div id="testPlaceholder">클릭해서 사진 선택 (여러 장 선택 가능)</div>
+    </div>
+    <input type="file" id="fileTest" accept="image/*" multiple>
+    <div class="row-actions"><button class="btn primary" id="btnRun" disabled>판별하기</button></div>
+    <div class="progress-track" id="progressTrack"><div class="progress-fill" id="progressFill"></div></div>
+    <p class="hint" id="runStatus"></p>
+  </div>
+
+  <div class="card" id="results">
+    <h2>결과</h2>
+    <div class="verdict" id="singleVerdict" style="display:none;">
+      <div class="pct" id="overallPct">–</div>
+      <div class="pct-label" id="overallLabel">AI 생성일 가능성</div>
+    </div>
+    <div id="resultList"></div>
+  </div>
+
+  <footer>모든 계산은 이 브라우저 안에서만 실행돼요. 업로드한 사진은 서버로 전송되지 않아요.</footer>
+</div>
+
+<script>
+// decorative starfield
+(function(){
+  const c = document.getElementById('stars'); const ctx = c.getContext('2d');
+  function draw(){
+    ctx.clearRect(0,0,c.width,c.height); ctx.fillStyle='rgba(255,255,255,0.5)';
+    const n = Math.floor((c.width*c.height)/9000); let seed=42;
+    function rnd(){ seed=(seed*9301+49297)%233280; return seed/233280; }
+    for(let i=0;i<n;i++){
+      const x=rnd()*c.width, y=rnd()*c.height, r=rnd()*1.2+0.2;
+      ctx.globalAlpha = rnd()*0.6+0.15;
+      ctx.beginPath(); ctx.arc(x,y,r,0,7); ctx.fill();
+    }
+    ctx.globalAlpha=1;
+  }
+  function resize(){ c.width=innerWidth; c.height=innerHeight; draw(); }
+  addEventListener('resize', resize); resize();
+})();
+
+let mobilenetModel = null;
+let headModel = null;
+
+async function ensureMobilenet(){
+  if(mobilenetModel) return mobilenetModel;
+  mobilenetModel = await mobilenet.load({version:1, alpha:0.5});
+  return mobilenetModel;
+}
+
+function loadImageFile(file){
+  return new Promise((resolve,reject)=>{
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = ()=>{ URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+async function embedImage(img){
+  const act = mobilenetModel.infer(img, true);
+  const arr = await act.data();
+  act.dispose();
+  return Array.from(arr);
+}
+
+const modelStatus = document.getElementById('modelStatus');
+const dzTest = document.getElementById('dzTest');
+const fileTest = document.getElementById('fileTest');
+const testPlaceholder = document.getElementById('testPlaceholder');
+const btnRun = document.getElementById('btnRun');
+const progressTrack = document.getElementById('progressTrack');
+const progressFill = document.getElementById('progressFill');
+const runStatus = document.getElementById('runStatus');
+const singleVerdict = document.getElementById('singleVerdict');
+const resultList = document.getElementById('resultList');
+let testFiles = [];
+
+dzTest.onclick = ()=> fileTest.click();
+fileTest.onchange = (e)=>{
+  testFiles = Array.from(e.target.files);
+  testPlaceholder.textContent = testFiles.length ? `${testFiles.length}장 선택됨` : '클릭해서 사진 선택 (여러 장 선택 가능)';
+  updateRunButton();
+};
+
+function updateRunButton(){
+  btnRun.disabled = !(testFiles.length && headModel);
+}
+
+btnRun.onclick = async ()=>{
+  await ensureMobilenet();
+  const results = document.getElementById('results');
+  results.style.display = 'block';
+  resultList.innerHTML = '';
+  progressTrack.style.display = 'block';
+  singleVerdict.style.display = testFiles.length === 1 ? 'flex' : 'none';
+
+  const scored = [];
+  for(let i=0;i<testFiles.length;i++){
+    const file = testFiles[i];
+    const img = await loadImageFile(file);
+    const emb = await embedImage(img);
+    const x = tf.tensor2d([emb]);
+    const pred = headModel.predict(x);
+    const [pReal, pAi] = await pred.data();
+    x.dispose(); pred.dispose();
+    scored.push({ name:file.name, url:URL.createObjectURL(file), pAi });
+    progressFill.style.width = Math.round(((i+1)/testFiles.length)*100)+'%';
+    runStatus.textContent = `판별 중... ${i+1}/${testFiles.length}`;
+  }
+  progressTrack.style.display = 'none';
+  runStatus.textContent = '';
+
+  if(testFiles.length === 1){
+    const r = scored[0];
+    document.getElementById('overallPct').textContent = (r.pAi*100).toFixed(0)+'%';
+    document.getElementById('overallLabel').textContent = r.pAi>=0.5 ? 'AI 생성 쪽에 더 가까움' : '실제 사진 쪽에 더 가까움';
+  } else {
+    scored.sort((a,b)=> b.pAi-a.pAi);
+    scored.forEach(r=>{
+      const row = document.createElement('div');
+      row.className = 'result-row';
+      row.innerHTML = `<img class="result-thumb" src="${r.url}"><div class="result-name">${r.name}</div><div class="result-pct">${(r.pAi*100).toFixed(0)}%</div><div class="result-label">${r.pAi>=0.5?'AI 쪽':'실제 쪽'}</div>`;
+      resultList.appendChild(row);
+    });
+  }
+  results.scrollIntoView({behavior:'smooth', block:'start'});
+};
+
+// ---------- 배포된 모델 불러오기 ----------
+(async function init(){
+  try{
+    headModel = await tf.loadLayersModel('./model/model.json');
+    modelStatus.textContent = '';
+    updateRunButton();
+  }catch(e){
+    modelStatus.textContent = '아직 배포된 모델이 없어요. 관리자가 모델을 배포하면 여기서 바로 판별할 수 있어요.';
+  }
+})();
+</script>
+</body>
+</html>
