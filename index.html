@@ -42,6 +42,11 @@
   .result-name{ flex:1; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .result-pct{ font-family:'Fraunces',serif; font-size:18px; min-width:60px; text-align:right; }
   .result-label{ font-size:11.5px; opacity:.75; min-width:64px; text-align:right; }
+  .feature{ margin-bottom:16px; }
+  .feature .flabel{ display:flex; justify-content:space-between; font-size:13px; margin-bottom:6px; opacity:.8; }
+  .feature .flabel span.name{ opacity:1; font-weight:500; }
+  .bar-track{ position:relative; height:8px; background:var(--panel-2); border:1px solid var(--line); overflow:hidden; }
+  .bar-fill{ position:absolute; left:0; top:0; bottom:0; background:#FFF; }
   footer{ opacity:.6; font-size:12px; margin-top:36px; max-width:560px; }
 </style>
 </head>
@@ -66,8 +71,9 @@
     <h2>결과</h2>
     <div class="verdict" id="singleVerdict" style="display:none;">
       <div class="pct" id="overallPct">–</div>
-      <div class="pct-label" id="overallLabel">AI 생성일 가능성</div>
+      <div class="pct-label" id="overallLabel">종합 — AI 생성일 가능성</div>
     </div>
+    <div id="featureList"></div>
     <div id="resultList"></div>
   </div>
 
@@ -119,6 +125,105 @@ async function embedImage(img){
   return Array.from(arr);
 }
 
+// 항목별(노이즈/색감/별패턴/디테일) — 학습된 모델의 "종합" 판단과는 별개로,
+// 관리자가 배포한 기준 통계와 비교해서 항목별로 어느 쪽에 가까운지 보여줌
+let featureStats = null;
+function extractHeuristicFeatures(imgEl){
+  const SIZE = 220;
+  const cv = document.createElement('canvas');
+  cv.width = SIZE; cv.height = SIZE;
+  const ctx = cv.getContext('2d');
+  const s = Math.max(SIZE/imgEl.width, SIZE/imgEl.height);
+  const w = imgEl.width*s, h = imgEl.height*s;
+  ctx.drawImage(imgEl, (SIZE-w)/2, (SIZE-h)/2, w, h);
+  const data = ctx.getImageData(0,0,SIZE,SIZE).data;
+  const n = SIZE*SIZE;
+  const gray = new Float32Array(n), sat = new Float32Array(n);
+  for(let i=0;i<n;i++){
+    const r=data[i*4], g=data[i*4+1], b=data[i*4+2];
+    const mx=Math.max(r,g,b), mn=Math.min(r,g,b);
+    gray[i] = 0.299*r+0.587*g+0.114*b;
+    sat[i] = mx===0 ? 0 : (mx-mn)/mx;
+  }
+  let bgSum=0,bgSqSum=0,bgN=0,brightSatSum=0,brightN=0;
+  const threshold=60;
+  for(let i=0;i<n;i++){
+    if(gray[i]<threshold){ bgSum+=gray[i]; bgSqSum+=gray[i]*gray[i]; bgN++; }
+    else { brightSatSum+=sat[i]; brightN++; }
+  }
+  const bgMean = bgN? bgSum/bgN : 0;
+  const bgVar = bgN? (bgSqSum/bgN - bgMean*bgMean) : 0;
+  const noiseScore = Math.sqrt(Math.max(bgVar,0));
+  const colorScore = brightN ? brightSatSum/brightN : 0;
+
+  let edgeSum=0, edgeN=0;
+  const gxK=[-1,0,1,-2,0,2,-1,0,1], gyK=[-1,-2,-1,0,0,0,1,2,1];
+  for(let y=1;y<SIZE-1;y++){
+    for(let x=1;x<SIZE-1;x++){
+      let gx=0,gy=0,k=0;
+      for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+        const v = gray[(y+dy)*SIZE+(x+dx)]; gx+=v*gxK[k]; gy+=v*gyK[k]; k++;
+      }
+      const mag = Math.sqrt(gx*gx+gy*gy);
+      if(gray[y*SIZE+x] > threshold){ edgeSum+=mag; edgeN++; }
+    }
+  }
+  const detailScore = edgeN ? edgeSum/edgeN : 0;
+
+  let symSum=0, symN=0; const R=4;
+  for(let y=R+1;y<SIZE-R-1 && symN<=40;y+=2){
+    for(let x=R+1;x<SIZE-R-1 && symN<=40;x+=2){
+      const v = gray[y*SIZE+x];
+      if(v<200) continue;
+      let isPeak=true;
+      for(let dy=-1;dy<=1&&isPeak;dy++) for(let dx=-1;dx<=1;dx++){
+        if(dx===0&&dy===0) continue;
+        if(gray[(y+dy)*SIZE+(x+dx)]>v){ isPeak=false; break; }
+      }
+      if(!isPeak) continue;
+      const a=gray[y*SIZE+(x-R)], b2=gray[y*SIZE+(x+R)];
+      const c1=gray[(y-R)*SIZE+x], d1=gray[(y+R)*SIZE+x];
+      const sym = 1 - Math.min(1,(Math.abs(a-b2)+Math.abs(c1-d1))/2/255);
+      symSum+=sym; symN++;
+    }
+  }
+  const starScore = symN ? symSum/symN : 0.5;
+
+  const blurred = new Float32Array(n);
+  for(let y=0;y<SIZE;y++){
+    for(let x=0;x<SIZE;x++){
+      let sum=0, cnt=0;
+      for(let dy=-1;dy<=1;dy++){
+        for(let dx=-1;dx<=1;dx++){
+          const yy=y+dy, xx=x+dx;
+          if(yy>=0&&yy<SIZE&&xx>=0&&xx<SIZE){ sum+=gray[yy*SIZE+xx]; cnt++; }
+        }
+      }
+      blurred[y*SIZE+x] = sum/cnt;
+    }
+  }
+  let resSum=0, resSqSum=0;
+  for(let i=0;i<n;i++){ const d = gray[i]-blurred[i]; resSum+=d; resSqSum+=d*d; }
+  const resMean = resSum/n;
+  const patternNoise = Math.sqrt(Math.max(resSqSum/n - resMean*resMean, 0));
+
+  return [noiseScore/60, colorScore, starScore, detailScore/80, patternNoise/12];
+}
+
+function heuristicBreakdown(testVec){
+  if(!featureStats) return null;
+  const { min, max, realMean, aiMean, names } = featureStats;
+  return names.map((name, i)=>{
+    const range = max[i]-min[i];
+    const nt = range ? (testVec[i]-min[i])/range : 0.5;
+    const nr = range ? (realMean[i]-min[i])/range : 0.5;
+    const na = range ? (aiMean[i]-min[i])/range : 0.5;
+    const dr = Math.abs(nt-nr), da = Math.abs(nt-na);
+    const lean = (dr+da) ? (dr/(dr+da))*100 : 50;
+    return { name, lean };
+  });
+}
+
 const modelStatus = document.getElementById('modelStatus');
 const dzTest = document.getElementById('dzTest');
 const fileTest = document.getElementById('fileTest');
@@ -159,17 +264,34 @@ btnRun.onclick = async ()=>{
     const pred = headModel.predict(x);
     const [pReal, pAi] = await pred.data();
     x.dispose(); pred.dispose();
-    scored.push({ name:file.name, url:URL.createObjectURL(file), pAi });
+    const heur = testFiles.length === 1 ? extractHeuristicFeatures(img) : null;
+    scored.push({ name:file.name, url:URL.createObjectURL(file), pAi, heur });
     progressFill.style.width = Math.round(((i+1)/testFiles.length)*100)+'%';
     runStatus.textContent = `판별 중... ${i+1}/${testFiles.length}`;
   }
   progressTrack.style.display = 'none';
   runStatus.textContent = '';
 
+  const featureList = document.getElementById('featureList');
+  featureList.innerHTML = '';
+
   if(testFiles.length === 1){
     const r = scored[0];
     document.getElementById('overallPct').textContent = (r.pAi*100).toFixed(0)+'%';
-    document.getElementById('overallLabel').textContent = r.pAi>=0.5 ? 'AI 생성 쪽에 더 가까움' : '실제 사진 쪽에 더 가까움';
+    document.getElementById('overallLabel').textContent = '종합 — ' + (r.pAi>=0.5 ? 'AI 생성 쪽에 더 가까움' : '실제 사진 쪽에 더 가까움');
+
+    const breakdown = heuristicBreakdown(r.heur);
+    if(breakdown){
+      breakdown.forEach(b=>{
+        const row = document.createElement('div');
+        row.className = 'feature';
+        row.innerHTML = `
+          <div class="flabel"><span class="name">${b.name}</span><span>${b.lean.toFixed(0)}% AI쪽</span></div>
+          <div class="bar-track"><div class="bar-fill" style="width:${b.lean}%"></div></div>
+        `;
+        featureList.appendChild(row);
+      });
+    }
   } else {
     scored.sort((a,b)=> b.pAi-a.pAi);
     scored.forEach(r=>{
@@ -191,6 +313,10 @@ btnRun.onclick = async ()=>{
   }catch(e){
     modelStatus.textContent = '아직 배포된 모델이 없어요. 관리자가 모델을 배포하면 여기서 바로 판별할 수 있어요.';
   }
+  try{
+    const res = await fetch('./model/feature_stats.json');
+    if(res.ok) featureStats = await res.json();
+  }catch(e){ /* 항목별 통계 없으면 종합 %만 보여줌 */ }
 })();
 </script>
 </body>
