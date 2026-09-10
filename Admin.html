@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>관리자 — 천체사진 감별기</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.1/dist/mobilenet.min.js"></script>
+<style>
+  :root{ --bg:#000; --panel:#000; --panel-2:#1A1A1A; --line:#FFF; --text:#FFF; --muted:#FFF; }
+  *{box-sizing:border-box;}
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:'Inter',sans-serif; line-height:1.5; }
+  .wrap{ max-width:760px; margin:0 auto; padding:56px 24px 96px; }
+  h1{ font-family:'Fraunces',serif; font-weight:500; font-size:clamp(26px,5vw,36px); margin:0 0 4px; }
+  .tag{ opacity:.6; font-size:12.5px; margin:0 0 48px; }
+  .card{ background:var(--panel); border:1px solid var(--line); border-radius:0; padding:28px; margin-bottom:24px; }
+  .card h2{ font-family:'Fraunces',serif; font-weight:500; font-size:18px; margin:0 0 4px; }
+  .card .sub{ opacity:.75; font-size:13px; margin:0 0 18px; }
+  label{ display:block; font-size:12.5px; opacity:.75; margin:14px 0 5px; }
+  label:first-child{ margin-top:0; }
+  input[type=text], input[type=password], input[type=number]{
+    width:100%; background:var(--panel-2); border:1px solid var(--line); color:var(--text);
+    padding:9px 10px; font-family:'Inter',sans-serif; font-size:13.5px; border-radius:0;
+  }
+  .row2{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:560px){ .row2{ grid-template-columns:1fr; } }
+  .dropzones{ display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px; }
+  @media (max-width:560px){ .dropzones{ grid-template-columns:1fr; } }
+  .dz{ border:1.5px dashed var(--line); padding:18px; text-align:center; cursor:pointer; }
+  .dz:hover{ background:var(--panel-2); }
+  .dz .label{ font-weight:600; font-size:14px; }
+  .dz .count{ opacity:.7; font-size:12.5px; margin-top:2px; }
+  input[type=file]{ display:none; }
+  .row-actions{ display:flex; gap:10px; margin-top:18px; flex-wrap:wrap; }
+  button.btn{
+    font-family:'Inter',sans-serif; background:var(--panel-2); color:var(--text);
+    border:1px solid var(--line); padding:9px 16px; border-radius:0; font-size:13.5px; font-weight:500; cursor:pointer;
+  }
+  button.btn.primary{ background:#FFF; color:#000; font-weight:700; }
+  button.btn:disabled{ opacity:.35; cursor:not-allowed; }
+  .progress-track{ height:6px; background:var(--panel-2); border:1px solid var(--line); margin-top:14px; display:none; }
+  .progress-fill{ height:100%; background:#FFF; width:0%; }
+  .hint{ font-size:12.5px; opacity:.7; margin-top:10px; white-space:pre-line; }
+  #log{ margin-top:12px; font-size:12px; max-height:220px; overflow-y:auto; border-top:1px solid var(--line); padding-top:8px; display:none; }
+  .log-row{ padding:3px 0; opacity:.85; }
+  .log-row.err{ text-decoration:underline; opacity:1; }
+  .step-num{ display:inline-block; width:22px; height:22px; border:1px solid var(--line); text-align:center; line-height:20px; font-size:12px; margin-right:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>관리자</h1>
+  <p class="tag">이 페이지는 홈에 링크되어 있지 않아요. 공개 판별기는 index.html에 따로 있어요.</p>
+
+  <div class="card">
+    <h2>GitHub 연결</h2>
+    <p class="sub">토큰은 저장하지 않아요. 새로고침하면 다시 입력해야 해요.</p>
+    <div class="row2">
+      <div><label>사용자명 / 조직명</label><input type="text" id="owner"></div>
+      <div><label>리포지토리 이름</label><input type="text" id="repo"></div>
+    </div>
+    <label>개인 액세스 토큰 (Contents: Read and write)</label>
+    <input type="password" id="token" placeholder="github_pat_...">
+    <label>브랜치</label>
+    <input type="text" id="branch" value="main">
+  </div>
+
+  <div class="card">
+    <h2><span class="step-num">1</span>기준사진등록</h2>
+    <p class="sub">리포에 이미 있는 사진을 먼저 불러온 다음, 새 사진을 추가해요. 새로 추가한 사진은 리사이즈돼서 real/fake 폴더에 자동으로 올라가요.</p>
+    <button class="btn" id="btnFetchExisting">리포에서 기존 사진 불러오기</button>
+    <div class="dropzones">
+      <div class="dz" id="dzReal">
+        <div class="label">실제 사진 추가</div>
+        <div class="count" id="countReal">등록됨 0장</div>
+      </div>
+      <div class="dz" id="dzAi">
+        <div class="label">AI 생성 사진 추가</div>
+        <div class="count" id="countAi">등록됨 0장</div>
+      </div>
+    </div>
+    <input type="file" id="fileReal" accept="image/*" multiple>
+    <input type="file" id="fileAi" accept="image/*" multiple>
+    <div class="row2" style="margin-top:14px;">
+      <div><label>업로드 시 최대 가로/세로(px)</label><input type="number" id="maxDim" value="800"></div>
+      <div><label>JPEG 품질(0.1~1.0)</label><input type="number" id="quality" value="0.8" step="0.05"></div>
+    </div>
+    <div class="progress-track" id="regProgressTrack"><div class="progress-fill" id="regProgressFill"></div></div>
+    <p class="hint" id="regStatus"></p>
+    <div id="regLog"></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="step-num">2</span>모델 학습</h2>
+    <p class="sub">등록된 사진 특징으로 분류기를 이 자리에서 학습시켜요.</p>
+    <button class="btn primary" id="btnTrain" disabled>학습 시작</button>
+    <div class="progress-track" id="trainProgressTrack"><div class="progress-fill" id="trainProgressFill"></div></div>
+    <p class="hint" id="trainStatus"></p>
+  </div>
+
+  <div class="card">
+    <h2><span class="step-num">3</span>모델 배포</h2>
+    <p class="sub">학습된 모델을 리포의 model/ 폴더에 올려요. 공개 판별기(index.html)가 이 파일을 읽어서 모두가 같은 모델을 쓰게 돼요.</p>
+    <button class="btn primary" id="btnDeploy" disabled>모델 배포하기</button>
+    <div class="progress-track" id="deployProgressTrack"><div class="progress-fill" id="deployProgressFill"></div></div>
+    <p class="hint" id="deployStatus"></p>
+  </div>
+</div>
+
+<script>
+// ---------- github helpers ----------
+function creds(){
+  return {
+    owner: document.getElementById('owner').value.trim(),
+    repo: document.getElementById('repo').value.trim(),
+    token: document.getElementById('token').value.trim(),
+    branch: document.getElementById('branch').value.trim() || 'main'
+  };
+}
+
+async function ghGetSha(owner, repo, path, token, branch){
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}?ref=${branch}`, {
+    headers: { Authorization: `token ${token}`, Accept: 'application/vnd.github+json' }
+  });
+  if(res.status === 200) return (await res.json()).sha;
+  return null;
+}
+async function ghListDir(owner, repo, path, token, branch){
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}?ref=${branch}`, {
+    headers: { Authorization: `token ${token}`, Accept: 'application/vnd.github+json' }
+  });
+  if(res.status !== 200) return [];
+  return await res.json(); // array of {name, download_url, ...}
+}
+async function ghPutFile(owner, repo, path, base64, token, branch, sha){
+  const body = { message: `update ${path}`, content: base64, branch };
+  if(sha) body.sha = sha;
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`, {
+    method:'PUT',
+    headers:{ Authorization:`token ${token}`, Accept:'application/vnd.github+json', 'Content-Type':'application/json' },
+    body: JSON.stringify(body)
+  });
+  if(!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0,200)}`);
+}
+
+// ---------- image helpers ----------
+function loadImageFile(file){
+  return new Promise((resolve,reject)=>{
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = ()=>{ URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+function loadImageFromUrl(url){
+  return new Promise((resolve,reject)=>{
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = ()=> resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+function resizeToJpegBase64(img, maxDim, quality){
+  let { width, height } = img;
+  if(width > maxDim || height > maxDim){
+    const scale = maxDim / Math.max(width, height);
+    width = Math.round(width*scale); height = Math.round(height*scale);
+  }
+  const cv = document.createElement('canvas');
+  cv.width = width; cv.height = height;
+  cv.getContext('2d').drawImage(img, 0, 0, width, height);
+  return { base64: cv.toDataURL('image/jpeg', quality).split(',')[1], canvasImg: cv };
+}
+function sanitizeName(name){
+  return name.replace(/\.[^.]+$/, '').replace(/[^a-zA-Z0-9가-힣_-]/g, '_') + '.jpg';
+}
+
+let mobilenetModel = null;
+async function ensureMobilenet(statusEl){
+  if(mobilenetModel) return mobilenetModel;
+  if(statusEl) statusEl.textContent = 'MobileNet 불러오는 중...';
+  mobilenetModel = await mobilenet.load({version:1, alpha:0.5});
+  if(statusEl) statusEl.textContent = '';
+  return mobilenetModel;
+}
+async function embedImgEl(imgEl){
+  const act = mobilenetModel.infer(imgEl, true);
+  const arr = await act.data();
+  act.dispose();
+  return Array.from(arr);
+}
+
+// ---------- state ----------
+let refs = { real: [], ai: [] }; // {embedding:number[]}
+
+const countReal = document.getElementById('countReal');
+const countAi = document.getElementById('countAi');
+const regStatus = document.getElementById('regStatus');
+const regLog = document.getElementById('regLog');
+const regProgressTrack = document.getElementById('regProgressTrack');
+const regProgressFill = document.getElementById('regProgressFill');
+
+function logLine(el, text, isErr){
+  el.style.display = 'block';
+  const row = document.createElement('div');
+  row.className = 'log-row' + (isErr ? ' err' : '');
+  row.textContent = text;
+  el.appendChild(row);
+  el.scrollTop = el.scrollHeight;
+}
+
+function updateCounts(){
+  countReal.textContent = '등록됨 ' + refs.real.length + '장';
+  countAi.textContent = '등록됨 ' + refs.ai.length + '장';
+  document.getElementById('btnTrain').disabled = !(refs.real.length >= 5 && refs.ai.length >= 5);
+}
+
+// 기존 사진 불러오기 (리포 → 임베딩만 추출, 재업로드 안 함)
+document.getElementById('btnFetchExisting').onclick = async ()=>{
+  const { owner, repo, token, branch } = creds();
+  if(!owner || !repo || !token){ regStatus.textContent = 'GitHub 연결 정보를 먼저 입력해주세요.'; return; }
+  await ensureMobilenet(regStatus);
+  regProgressTrack.style.display = 'block';
+
+  for(const [cls, folder] of [['real','real'], ['ai','fake']]){
+    const files = await ghListDir(owner, repo, folder, token, branch);
+    const imgFiles = files.filter(f => f.type === 'file' && /\.(jpg|jpeg|png|webp)$/i.test(f.name));
+    for(let i=0;i<imgFiles.length;i++){
+      try{
+        const img = await loadImageFromUrl(imgFiles[i].download_url);
+        const emb = await embedImgEl(img);
+        refs[cls].push({ embedding: emb });
+        logLine(regLog, `불러옴: ${folder}/${imgFiles[i].name}`);
+      }catch(err){
+        logLine(regLog, `실패: ${folder}/${imgFiles[i].name} — ${err.message}`, true);
+      }
+      regStatus.textContent = `기존 사진 불러오는 중... (${cls==='real'?'실제':'AI'}) ${i+1}/${imgFiles.length}`;
+    }
+  }
+  regProgressTrack.style.display = 'none';
+  regStatus.textContent = '기존 사진 불러오기 완료.';
+  updateCounts();
+};
+
+// 새 사진 추가 (리사이즈 → GitHub 업로드 → 임베딩도 같이 저장)
+async function addNewFiles(fileList, cls, folder){
+  const { owner, repo, token, branch } = creds();
+  if(!owner || !repo || !token){ regStatus.textContent = 'GitHub 연결 정보를 먼저 입력해주세요.'; return; }
+  await ensureMobilenet(regStatus);
+  const files = Array.from(fileList);
+  const maxDim = parseInt(document.getElementById('maxDim').value,10) || 800;
+  const quality = parseFloat(document.getElementById('quality').value) || 0.8;
+
+  regProgressTrack.style.display = 'block';
+  for(let i=0;i<files.length;i++){
+    const file = files[i];
+    try{
+      const img = await loadImageFile(file);
+      const { base64, canvasImg } = resizeToJpegBase64(img, maxDim, quality);
+      const emb = await embedImgEl(canvasImg);
+      const path = `${folder}/${Date.now()}_${sanitizeName(file.name)}`;
+      await ghPutFile(owner, repo, path, base64, token, branch, null);
+      refs[cls].push({ embedding: emb });
+      logLine(regLog, `업로드: ${path}`);
+    }catch(err){
+      logLine(regLog, `실패: ${file.name} — ${err.message}`, true);
+    }
+    regProgressFill.style.width = Math.round(((i+1)/files.length)*100) + '%';
+    regStatus.textContent = `추가 중... ${i+1}/${files.length}`;
+  }
+  regProgressTrack.style.display = 'none';
+  regStatus.textContent = '추가 완료.';
+  updateCounts();
+}
+
+document.getElementById('dzReal').onclick = ()=> document.getElementById('fileReal').click();
+document.getElementById('dzAi').onclick = ()=> document.getElementById('fileAi').click();
+document.getElementById('fileReal').onchange = (e)=> addNewFiles(e.target.files, 'real', 'real');
+document.getElementById('fileAi').onchange = (e)=> addNewFiles(e.target.files, 'ai', 'fake');
+
+// ---------- 2. 학습 ----------
+let headModel = null;
+const btnTrain = document.getElementById('btnTrain');
+const trainProgressTrack = document.getElementById('trainProgressTrack');
+const trainProgressFill = document.getElementById('trainProgressFill');
+const trainStatus = document.getElementById('trainStatus');
+
+btnTrain.onclick = async ()=>{
+  const xs = [], ys = [];
+  refs.real.forEach(r=>{ xs.push(r.embedding); ys.push([1,0]); });
+  refs.ai.forEach(r=>{ xs.push(r.embedding); ys.push([0,1]); });
+
+  const xTensor = tf.tensor2d(xs);
+  const yTensor = tf.tensor2d(ys);
+  const inputDim = xs[0].length;
+
+  headModel = tf.sequential();
+  headModel.add(tf.layers.dense({inputShape:[inputDim], units:32, activation:'relu'}));
+  headModel.add(tf.layers.dropout({rate:0.3}));
+  headModel.add(tf.layers.dense({units:2, activation:'softmax'}));
+  headModel.compile({optimizer:tf.train.adam(0.001), loss:'categoricalCrossentropy', metrics:['accuracy']});
+
+  const nReal = refs.real.length, nAi = refs.ai.length, total = nReal+nAi;
+  const classWeight = { 0: total/(2*nReal), 1: total/(2*nAi) };
+
+  trainProgressTrack.style.display = 'block';
+  const EPOCHS = 30;
+  await headModel.fit(xTensor, yTensor, {
+    epochs: EPOCHS, batchSize:16, shuffle:true, validationSplit:0.15, classWeight,
+    callbacks:{ onEpochEnd:(epoch,logs)=>{
+      trainProgressFill.style.width = Math.round(((epoch+1)/EPOCHS)*100)+'%';
+      trainStatus.textContent = `epoch ${epoch+1}/${EPOCHS} — loss ${logs.loss.toFixed(3)}, acc ${logs.acc?.toFixed(3)??''}, val_acc ${logs.val_acc?.toFixed(3)??''}`;
+    }}
+  });
+  trainProgressTrack.style.display = 'none';
+  xTensor.dispose(); yTensor.dispose();
+  trainStatus.textContent += '\n학습 완료.';
+  document.getElementById('btnDeploy').disabled = false;
+};
+
+// ---------- 3. 배포 ----------
+function arrayBufferToBase64(buf){
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  const chunk = 0x8000;
+  for(let i=0;i<bytes.length;i+=chunk){
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
+  }
+  return btoa(binary);
+}
+
+document.getElementById('btnDeploy').onclick = async ()=>{
+  const { owner, repo, token, branch } = creds();
+  if(!owner || !repo || !token){ document.getElementById('deployStatus').textContent = 'GitHub 연결 정보를 먼저 입력해주세요.'; return; }
+  const deployStatus = document.getElementById('deployStatus');
+  const deployProgressTrack = document.getElementById('deployProgressTrack');
+  deployProgressTrack.style.display = 'block';
+  deployStatus.textContent = '모델 내보내는 중...';
+
+  let artifacts;
+  await headModel.save(tf.io.withSaveHandler(async (a)=>{ artifacts = a; return { modelArtifactsInfo:{dateSaved:new Date(), modelTopologyType:'JSON'} }; }));
+
+  const modelJson = {
+    modelTopology: artifacts.modelTopology,
+    format: 'layers-model',
+    generatedBy: 'astro-detector-admin',
+    convertedBy: null,
+    weightsManifest: [{ paths: ['weights.bin'], weights: artifacts.weightSpecs }]
+  };
+  const modelJsonBase64 = btoa(unescape(encodeURIComponent(JSON.stringify(modelJson))));
+  const weightsBase64 = arrayBufferToBase64(artifacts.weightData);
+
+  try{
+    deployStatus.textContent = 'model.json 업로드 중...';
+    const shaJson = await ghGetSha(owner, repo, 'model/model.json', token, branch);
+    await ghPutFile(owner, repo, 'model/model.json', modelJsonBase64, token, branch, shaJson);
+
+    deployStatus.textContent = 'weights.bin 업로드 중...';
+    const shaBin = await ghGetSha(owner, repo, 'model/weights.bin', token, branch);
+    await ghPutFile(owner, repo, 'model/weights.bin', weightsBase64, token, branch, shaBin);
+
+    deployProgressTrack.style.display = 'none';
+    deployStatus.textContent = '배포 완료 — 공개 판별기가 이제 이 모델을 사용해요.';
+  }catch(err){
+    deployProgressTrack.style.display = 'none';
+    deployStatus.textContent = '배포 실패: ' + err.message;
+  }
+};
+</script>
+</body>
+</html>
