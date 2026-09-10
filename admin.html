@@ -292,9 +292,19 @@ btnTrain.onclick = async ()=>{
   refs.real.forEach(r=>{ xs.push(r.embedding); ys.push([1,0]); });
   refs.ai.forEach(r=>{ xs.push(r.embedding); ys.push([0,1]); });
 
-  const xTensor = tf.tensor2d(xs);
-  const yTensor = tf.tensor2d(ys);
-  const inputDim = xs[0].length;
+  // 실제/AI가 순서대로 이어붙여져 있으면 validationSplit이 뒤쪽(주로 소수 클래스)만
+  // 떼어가서 그 클래스가 학습에서 거의 빠지는 문제가 생김 — 먼저 섞어줌
+  const idx = xs.map((_,i)=>i);
+  for(let i=idx.length-1;i>0;i--){
+    const j = Math.floor(Math.random()*(i+1));
+    [idx[i], idx[j]] = [idx[j], idx[i]];
+  }
+  const xsShuffled = idx.map(i=>xs[i]);
+  const ysShuffled = idx.map(i=>ys[i]);
+
+  const xTensor = tf.tensor2d(xsShuffled);
+  const yTensor = tf.tensor2d(ysShuffled);
+  const inputDim = xsShuffled[0].length;
 
   headModel = tf.sequential();
   headModel.add(tf.layers.dense({inputShape:[inputDim], units:32, activation:'relu'}));
@@ -305,13 +315,21 @@ btnTrain.onclick = async ()=>{
   const nReal = refs.real.length, nAi = refs.ai.length, total = nReal+nAi;
   const classWeight = { 0: total/(2*nReal), 1: total/(2*nAi) };
 
+  // 데이터가 적으면(특히 적은 쪽 클래스가 10장 미만) 검증 분리를 하면
+  // 안 그래도 부족한 학습 데이터가 더 줄어드니까 검증을 아예 생략함
+  const minClassCount = Math.min(nReal, nAi);
+  const useValidation = minClassCount >= 10;
+
   trainProgressTrack.style.display = 'block';
   const EPOCHS = 30;
   await headModel.fit(xTensor, yTensor, {
-    epochs: EPOCHS, batchSize:16, shuffle:true, validationSplit:0.15, classWeight,
+    epochs: EPOCHS, batchSize:16, shuffle:true,
+    ...(useValidation ? {validationSplit:0.15} : {}),
+    classWeight,
     callbacks:{ onEpochEnd:(epoch,logs)=>{
       trainProgressFill.style.width = Math.round(((epoch+1)/EPOCHS)*100)+'%';
-      trainStatus.textContent = `epoch ${epoch+1}/${EPOCHS} — loss ${logs.loss.toFixed(3)}, acc ${logs.acc?.toFixed(3)??''}, val_acc ${logs.val_acc?.toFixed(3)??''}`;
+      const valPart = useValidation ? `, val_acc ${logs.val_acc?.toFixed(3)??''}` : ' (데이터 적어서 검증 생략)';
+      trainStatus.textContent = `epoch ${epoch+1}/${EPOCHS} — loss ${logs.loss.toFixed(3)}, acc ${logs.acc?.toFixed(3)??''}${valPart}`;
     }}
   });
   trainProgressTrack.style.display = 'none';
