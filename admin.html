@@ -47,6 +47,14 @@
   .log-row{ padding:3px 0; opacity:.85; }
   .log-row.err{ text-decoration:underline; opacity:1; }
   .step-num{ display:inline-block; width:22px; height:22px; border:1px solid var(--line); text-align:center; line-height:20px; font-size:12px; margin-right:8px; }
+  .thumbs{ display:flex; flex-wrap:wrap; gap:6px; margin-top:14px; }
+  .thumb{ position:relative; width:52px; height:52px; border:1px solid var(--line); overflow:hidden; flex-shrink:0; }
+  .thumb img{ width:100%; height:100%; object-fit:cover; display:block; }
+  .thumb.noimg{ display:flex; align-items:center; justify-content:center; font-size:9px; opacity:.5; text-align:center; }
+  .thumb button{
+    position:absolute; top:0; right:0; width:16px; height:16px; background:#000; color:#FFF;
+    border:1px solid var(--line); font-size:10px; line-height:14px; padding:0; cursor:pointer;
+  }
 </style>
 </head>
 <body>
@@ -78,6 +86,8 @@
     <input type="file" id="fileReal" accept="image/*" multiple>
     <input type="file" id="fileAi" accept="image/*" multiple>
     <p class="hint">여기서 추가한 사진은 바로 특징값만 뽑히고 원본은 리포에 안 올라가요. 아래 "특징값 저장"을 눌러야 리포에 반영돼요.</p>
+    <div class="thumbs" id="thumbsReal"></div>
+    <div class="thumbs" id="thumbsAi"></div>
     <div class="row-actions">
       <button class="btn primary" id="btnSaveDataset">특징값 저장</button>
     </div>
@@ -208,6 +218,19 @@ async function embedImgEl(imgEl){
   return Array.from(arr);
 }
 
+// 관리 화면에서 "이게 무슨 사진인지" 알아볼 수 있게 저화질 썸네일도 같이 저장
+// (원본이 삭제되기 전, 즉 지금 이 순간이 썸네일을 뽑을 수 있는 마지막 기회)
+function makeThumb(imgEl, size){
+  size = size || 64;
+  const cv = document.createElement('canvas');
+  cv.width = size; cv.height = size;
+  const ctx = cv.getContext('2d');
+  const s = Math.max(size/imgEl.width, size/imgEl.height);
+  const w = imgEl.width*s, h = imgEl.height*s;
+  ctx.drawImage(imgEl, (size-w)/2, (size-h)/2, w, h);
+  return cv.toDataURL('image/jpeg', 0.5);
+}
+
 // 항목별(노이즈/색감/별패턴/디테일) 해석용 보조 특징 — 학습된 신경망과는 별개로
 // "왜 그렇게 판단했는지" 참고용 수치를 만들기 위한 통계 기반 특징
 const HEURISTIC_NAMES = ['노이즈(배경 그레인)', '색감(채도)', '별 패턴 대칭성', '디테일(에지 선명도)', '패턴노이즈(고주파 잔차)'];
@@ -318,7 +341,39 @@ function updateCounts(){
   countReal.textContent = '등록됨 ' + refs.real.length + '장';
   countAi.textContent = '등록됨 ' + refs.ai.length + '장';
   document.getElementById('btnTrain').disabled = !(refs.real.length >= 5 && refs.ai.length >= 5);
+  renderThumbs();
 }
+
+function renderThumbs(){
+  const thumbsReal = document.getElementById('thumbsReal');
+  const thumbsAi = document.getElementById('thumbsAi');
+  thumbsReal.innerHTML = '';
+  thumbsAi.innerHTML = '';
+  refs.real.forEach((r,idx)=>{
+    const d = document.createElement('div');
+    d.className = r.thumb ? 'thumb' : 'thumb noimg';
+    d.innerHTML = r.thumb
+      ? `<img src="${r.thumb}"><button data-cls="real" data-idx="${idx}">×</button>`
+      : `원본없음<button data-cls="real" data-idx="${idx}">×</button>`;
+    thumbsReal.appendChild(d);
+  });
+  refs.ai.forEach((r,idx)=>{
+    const d = document.createElement('div');
+    d.className = r.thumb ? 'thumb' : 'thumb noimg';
+    d.innerHTML = r.thumb
+      ? `<img src="${r.thumb}"><button data-cls="ai" data-idx="${idx}">×</button>`
+      : `원본없음<button data-cls="ai" data-idx="${idx}">×</button>`;
+    thumbsAi.appendChild(d);
+  });
+}
+
+document.body.addEventListener('click', (e)=>{
+  if(e.target.tagName === 'BUTTON' && e.target.dataset.cls){
+    const cls = e.target.dataset.cls, idx = +e.target.dataset.idx;
+    refs[cls].splice(idx,1);
+    updateCounts();
+  }
+});
 
 // 저장된 특징값 불러오기 (dataset/real.json, dataset/fake.json — 이미지 다운로드 없이 빠름)
 document.getElementById('btnFetchExisting').onclick = async ()=>{
@@ -348,7 +403,8 @@ async function addNewFiles(fileList, cls){
       const img = await loadImageFile(file);
       const emb = await embedImgEl(img);
       const heur = extractHeuristicFeatures(img);
-      refs[cls].push({ embedding: emb, heuristic: heur });
+      const thumb = makeThumb(img);
+      refs[cls].push({ embedding: emb, heuristic: heur, thumb });
       logLine(regLog, `특징값 추출: ${file.name}`);
     }catch(err){
       logLine(regLog, `실패: ${file.name} — ${err.message}`, true);
@@ -407,7 +463,8 @@ document.getElementById('btnMigrate').onclick = async ()=>{
         const img = await loadImageFromUrl(f.download_url);
         const emb = await embedImgEl(img);
         const heur = extractHeuristicFeatures(img);
-        refs[cls].push({ embedding: emb, heuristic: heur });
+        const thumb = makeThumb(img);
+        refs[cls].push({ embedding: emb, heuristic: heur, thumb });
         await ghDeleteFile(owner, repo, f.path, f.sha, token, branch);
         converted++;
         logLine(migrateLog, `변환+삭제: ${f.path}`);
