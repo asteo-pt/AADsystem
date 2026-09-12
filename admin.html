@@ -167,8 +167,8 @@ async function ghDeleteFile(owner, repo, path, sha, token, branch){
 }
 async function ghGetJson(owner, repo, path, token, branch){
   // Contents API는 1MB 넘는 파일의 content를 안 돌려주므로, raw 파일을 직접 읽음
+  // (public 리포라 토큰 없이 접근 가능 — 토큰을 실어 보내면 CORS 프리플라이트에서 막힘)
   const res = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${path}`, {
-    headers: { Authorization: `token ${token}` },
     cache: 'no-store'
   });
   if(res.status === 404) return null;
