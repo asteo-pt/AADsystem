@@ -130,7 +130,8 @@ function creds(){
 
 async function ghGetSha(owner, repo, path, token, branch){
   const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}?ref=${branch}`, {
-    headers: { Authorization: `token ${token}`, Accept: 'application/vnd.github+json' }
+    headers: { Authorization: `token ${token}`, Accept: 'application/vnd.github+json' },
+    cache: 'no-store'
   });
   if(res.status === 200) return (await res.json()).sha;
   return null;
@@ -142,7 +143,10 @@ async function ghListDir(owner, repo, path, token, branch){
   if(res.status !== 200) return [];
   return await res.json(); // array of {name, download_url, ...}
 }
-async function ghPutFile(owner, repo, path, base64, token, branch, sha, retry){
+function sleepMs(ms){ return new Promise(r=>setTimeout(r, ms)); }
+
+async function ghPutFile(owner, repo, path, base64, token, branch, sha, attempt){
+  attempt = attempt || 0;
   const body = { message: `update ${path}`, content: base64, branch };
   if(sha) body.sha = sha;
   const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`, {
@@ -150,10 +154,11 @@ async function ghPutFile(owner, repo, path, base64, token, branch, sha, retry){
     headers:{ Authorization:`token ${token}`, Accept:'application/vnd.github+json', 'Content-Type':'application/json' },
     body: JSON.stringify(body)
   });
-  if(res.status === 409 && !retry){
-    // 파일이 그 사이 바뀐 경우(sha 충돌) — 최신 sha 다시 받아서 한 번만 재시도
+  if(res.status === 409 && attempt < 3){
+    // 파일이 그 사이 바뀐 경우(sha 충돌) — 잠깐 기다렸다가 최신 sha 다시 받아서 재시도 (최대 3번)
+    await sleepMs(400 * (attempt+1));
     const freshSha = await ghGetSha(owner, repo, path, token, branch);
-    return ghPutFile(owner, repo, path, base64, token, branch, freshSha, true);
+    return ghPutFile(owner, repo, path, base64, token, branch, freshSha, attempt+1);
   }
   if(!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0,200)}`);
 }
@@ -611,6 +616,27 @@ document.getElementById('btnDeploy').onclick = async ()=>{
   let artifacts;
   await headModel.save(tf.io.withSaveHandler(async (a)=>{ artifacts = a; return { modelArtifactsInfo:{dateSaved:new Date(), modelTopologyType:'JSON'} }; }));
 
+  // tf.js 버전에 따라 weightData가 배열(ArrayBuffer[])로 올 수 있음 — 하나로 이어붙여서
+  // 항상 단일 ArrayBuffer로 다루도록 정규화 (모델/가중치 불일치 버그 방지)
+  let weightDataBuf = artifacts.weightData;
+  if(Array.isArray(weightDataBuf)){
+    const totalBytes = weightDataBuf.reduce((s,b)=>s+b.byteLength,0);
+    const merged = new Uint8Array(totalBytes);
+    let offset = 0;
+    for(const buf of weightDataBuf){ merged.set(new Uint8Array(buf), offset); offset += buf.byteLength; }
+    weightDataBuf = merged.buffer;
+  }
+
+  // 배포 전 검증: model.json이 요구하는 가중치 개수와 실제 데이터 개수가 맞는지 확인.
+  // 안 맞으면 애초에 업로드하지 않고 바로 에러를 냄 (모델·가중치 불일치 상태로 배포되는 것을 방지)
+  const expectedCount = artifacts.weightSpecs.reduce((sum,w)=> sum + w.shape.reduce((a,b)=>a*b,1), 0);
+  const actualCount = weightDataBuf.byteLength / 4; // float32 = 4바이트
+  if(expectedCount !== actualCount){
+    deployProgressTrack.style.display = 'none';
+    deployStatus.textContent = `배포 중단: 가중치 개수 불일치 (필요 ${expectedCount}개, 실제 ${actualCount}개). 재학습 후 다시 시도해줘.`;
+    return;
+  }
+
   const modelJson = {
     modelTopology: artifacts.modelTopology,
     format: 'layers-model',
@@ -619,7 +645,7 @@ document.getElementById('btnDeploy').onclick = async ()=>{
     weightsManifest: [{ paths: ['weights.bin'], weights: artifacts.weightSpecs }]
   };
   const modelJsonBase64 = btoa(unescape(encodeURIComponent(JSON.stringify(modelJson))));
-  const weightsBase64 = arrayBufferToBase64(artifacts.weightData);
+  const weightsBase64 = arrayBufferToBase64(weightDataBuf);
 
   try{
     deployStatus.textContent = 'model.json 업로드 중...';
