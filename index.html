@@ -341,7 +341,8 @@ btnRun.onclick = async ()=>{
     modelStatus.textContent = '';
     updateRunButton();
   }catch(e){
-    modelStatus.textContent = '아직 배포된 모델이 없어요. 관리자가 모델을 배포하면 여기서 바로 판별할 수 있어요.';
+    console.error('모델 로드 실패:', e);
+    modelStatus.textContent = '아직 배포된 모델이 없어요. 관리자가 모델을 배포하면 여기서 바로 판별할 수 있어요. (오류: ' + e.message + ')';
   }
   try{
     const res = await fetch('./model/feature_stats.json');
