@@ -202,7 +202,7 @@ let mobilenetModel = null;
 async function ensureMobilenet(statusEl){
   if(mobilenetModel) return mobilenetModel;
   if(statusEl) statusEl.textContent = 'MobileNet 불러오는 중...';
-  mobilenetModel = await mobilenet.load({version:1, alpha:0.5});
+  mobilenetModel = await mobilenet.load({version:2, alpha:1.0});
   if(statusEl) statusEl.textContent = '';
   return mobilenetModel;
 }
@@ -230,15 +230,18 @@ function makeThumb(imgEl, size){
 // "왜 그렇게 판단했는지" 참고용 수치를 만들기 위한 통계 기반 특징
 const HEURISTIC_NAMES = ['노이즈(배경 그레인)', '색감(채도)', '별 패턴 대칭성', '디테일(에지 선명도)', '패턴노이즈(고주파 잔차)'];
 function extractHeuristicFeatures(imgEl){
-  const SIZE = 512;
+  // 정사각형으로 억지로 자르지 않고 원본 가로세로 비율을 그대로 유지.
+  // 너무 큰 사진(요즘 카메라는 수천px)은 CAP까지만 축소 — 그 이하 사진은 원본 그대로 사용.
+  const CAP = 2048;
+  const scale = Math.min(1, CAP / Math.max(imgEl.width, imgEl.height));
+  const W = Math.max(1, Math.round(imgEl.width * scale));
+  const H = Math.max(1, Math.round(imgEl.height * scale));
   const cv = document.createElement('canvas');
-  cv.width = SIZE; cv.height = SIZE;
+  cv.width = W; cv.height = H;
   const ctx = cv.getContext('2d');
-  const s = Math.max(SIZE/imgEl.width, SIZE/imgEl.height);
-  const w = imgEl.width*s, h = imgEl.height*s;
-  ctx.drawImage(imgEl, (SIZE-w)/2, (SIZE-h)/2, w, h);
-  const data = ctx.getImageData(0,0,SIZE,SIZE).data;
-  const n = SIZE*SIZE;
+  ctx.drawImage(imgEl, 0, 0, W, H);
+  const data = ctx.getImageData(0,0,W,H).data;
+  const n = W*H;
   const gray = new Float32Array(n), sat = new Float32Array(n);
   for(let i=0;i<n;i++){
     const r=data[i*4], g=data[i*4+1], b=data[i*4+2];
@@ -259,31 +262,31 @@ function extractHeuristicFeatures(imgEl){
 
   let edgeSum=0, edgeN=0;
   const gxK=[-1,0,1,-2,0,2,-1,0,1], gyK=[-1,-2,-1,0,0,0,1,2,1];
-  for(let y=1;y<SIZE-1;y++){
-    for(let x=1;x<SIZE-1;x++){
+  for(let y=1;y<H-1;y++){
+    for(let x=1;x<W-1;x++){
       let gx=0,gy=0,k=0;
       for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
-        const v = gray[(y+dy)*SIZE+(x+dx)]; gx+=v*gxK[k]; gy+=v*gyK[k]; k++;
+        const v = gray[(y+dy)*W+(x+dx)]; gx+=v*gxK[k]; gy+=v*gyK[k]; k++;
       }
       const mag = Math.sqrt(gx*gx+gy*gy);
-      if(gray[y*SIZE+x] > threshold){ edgeSum+=mag; edgeN++; }
+      if(gray[y*W+x] > threshold){ edgeSum+=mag; edgeN++; }
     }
   }
   const detailScore = edgeN ? edgeSum/edgeN : 0;
 
   let symSum=0, symN=0; const R=4;
-  for(let y=R+1;y<SIZE-R-1 && symN<=40;y+=2){
-    for(let x=R+1;x<SIZE-R-1 && symN<=40;x+=2){
-      const v = gray[y*SIZE+x];
+  for(let y=R+1;y<H-R-1 && symN<=40;y+=2){
+    for(let x=R+1;x<W-R-1 && symN<=40;x+=2){
+      const v = gray[y*W+x];
       if(v<200) continue;
       let isPeak=true;
       for(let dy=-1;dy<=1&&isPeak;dy++) for(let dx=-1;dx<=1;dx++){
         if(dx===0&&dy===0) continue;
-        if(gray[(y+dy)*SIZE+(x+dx)]>v){ isPeak=false; break; }
+        if(gray[(y+dy)*W+(x+dx)]>v){ isPeak=false; break; }
       }
       if(!isPeak) continue;
-      const a=gray[y*SIZE+(x-R)], b2=gray[y*SIZE+(x+R)];
-      const c1=gray[(y-R)*SIZE+x], d1=gray[(y+R)*SIZE+x];
+      const a=gray[y*W+(x-R)], b2=gray[y*W+(x+R)];
+      const c1=gray[(y-R)*W+x], d1=gray[(y+R)*W+x];
       const sym = 1 - Math.min(1,(Math.abs(a-b2)+Math.abs(c1-d1))/2/255);
       symSum+=sym; symN++;
     }
@@ -292,17 +295,18 @@ function extractHeuristicFeatures(imgEl){
 
   // 패턴노이즈(고주파 잔차): 3x3 박스블러한 버전과 원본을 픽셀별로 빼서
   // 남는 고주파 성분의 표준편차를 봄 — 포렌식 이미지 분석에서 쓰는 잔차 노이즈 기법
+  // 원본 비율 그대로, 캔버스 안의 모든 픽셀을 하나씩 순회해서 계산함
   const blurred = new Float32Array(n);
-  for(let y=0;y<SIZE;y++){
-    for(let x=0;x<SIZE;x++){
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++){
       let sum=0, cnt=0;
       for(let dy=-1;dy<=1;dy++){
         for(let dx=-1;dx<=1;dx++){
           const yy=y+dy, xx=x+dx;
-          if(yy>=0&&yy<SIZE&&xx>=0&&xx<SIZE){ sum+=gray[yy*SIZE+xx]; cnt++; }
+          if(yy>=0&&yy<H&&xx>=0&&xx<W){ sum+=gray[yy*W+xx]; cnt++; }
         }
       }
-      blurred[y*SIZE+x] = sum/cnt;
+      blurred[y*W+x] = sum/cnt;
     }
   }
   let resSum=0, resSqSum=0;
@@ -447,8 +451,10 @@ const trainStatus = document.getElementById('trainStatus');
 
 btnTrain.onclick = async ()=>{
   const xs = [], ys = [];
-  refs.real.forEach(r=>{ xs.push(r.embedding); ys.push([1,0]); });
-  refs.ai.forEach(r=>{ xs.push(r.embedding); ys.push([0,1]); });
+  // MobileNet 임베딩만이 아니라 통계 기반 5개 지표(노이즈/색감/별패턴/디테일/패턴노이즈)도
+  // 함께 입력으로 넣음 — 그래야 픽셀 단위로 계산한 패턴노이즈가 실제 판단에 반영됨
+  refs.real.forEach(r=>{ xs.push([...r.embedding, ...r.heuristic]); ys.push([1,0]); });
+  refs.ai.forEach(r=>{ xs.push([...r.embedding, ...r.heuristic]); ys.push([0,1]); });
 
   // 실제/AI가 순서대로 이어붙여져 있으면 validationSplit이 뒤쪽(주로 소수 클래스)만
   // 떼어가서 그 클래스가 학습에서 거의 빠지는 문제가 생김 — 먼저 섞어줌
@@ -460,15 +466,8 @@ btnTrain.onclick = async ()=>{
   const xsShuffled = idx.map(i=>xs[i]);
   const ysShuffled = idx.map(i=>ys[i]);
 
-  const xTensor = tf.tensor2d(xsShuffled);
-  const yTensor = tf.tensor2d(ysShuffled);
+  const xTensor_all = xsShuffled, yTensor_all = ysShuffled;
   const inputDim = xsShuffled[0].length;
-
-  headModel = tf.sequential();
-  headModel.add(tf.layers.dense({inputShape:[inputDim], units:32, activation:'relu'}));
-  headModel.add(tf.layers.dropout({rate:0.3}));
-  headModel.add(tf.layers.dense({units:2, activation:'softmax'}));
-  headModel.compile({optimizer:tf.train.adam(0.001), loss:'categoricalCrossentropy', metrics:['accuracy']});
 
   const nReal = refs.real.length, nAi = refs.ai.length, total = nReal+nAi;
   const classWeight = { 0: total/(2*nReal), 1: total/(2*nAi) };
@@ -478,18 +477,92 @@ btnTrain.onclick = async ()=>{
   const minClassCount = Math.min(nReal, nAi);
   const useValidation = minClassCount >= 10;
 
+  // 검증셋을 명시적으로 따로 떼어둠 — 학습 끝난 뒤 확신도 보정(temperature scaling)에 재사용하기 위함
+  let xTrainArr = xTensor_all, yTrainArr = yTensor_all, xValArr = null, yValArr = null;
+  if(useValidation){
+    const valCount = Math.max(1, Math.floor(xTensor_all.length * 0.15));
+    xValArr = xTensor_all.slice(0, valCount);
+    yValArr = yTensor_all.slice(0, valCount);
+    xTrainArr = xTensor_all.slice(valCount);
+    yTrainArr = yTensor_all.slice(valCount);
+  }
+  const xTensor = tf.tensor2d(xTrainArr);
+  const yTensor = tf.tensor2d(yTrainArr);
+  const xValTensor = useValidation ? tf.tensor2d(xValArr) : null;
+  const yValTensor = useValidation ? tf.tensor2d(yValArr) : null;
+
+  headModel = tf.sequential();
+  headModel.add(tf.layers.dense({
+    inputShape:[inputDim], units:64, activation:'relu',
+    kernelRegularizer: tf.regularizers.l2({l2: 0.005})
+  }));
+  headModel.add(tf.layers.dropout({rate:0.5}));
+  headModel.add(tf.layers.dense({units:2, activation:'softmax'}));
+  headModel.compile({optimizer:tf.train.adam(0.001), loss:'categoricalCrossentropy', metrics:['accuracy']});
+
+  // 조기 종료(early stopping): 검증 손실이 더 안 좋아지면 자동으로 멈추고,
+  // 가장 좋았던 시점의 가중치로 되돌림 — 과적합(학습만 잘 맞히고 새 데이터는 못 맞히는 현상) 방지
+  let bestValLoss = Infinity, bestWeights = null, patienceCount = 0;
+  const PATIENCE = 5;
+
   trainProgressTrack.style.display = 'block';
   const EPOCHS = 30;
   await headModel.fit(xTensor, yTensor, {
     epochs: EPOCHS, batchSize:16, shuffle:true,
-    ...(useValidation ? {validationSplit:0.15} : {}),
+    ...(useValidation ? {validationData:[xValTensor, yValTensor]} : {}),
     classWeight,
     callbacks:{ onEpochEnd:(epoch,logs)=>{
       trainProgressFill.style.width = Math.round(((epoch+1)/EPOCHS)*100)+'%';
       const valPart = useValidation ? `, val_acc ${logs.val_acc?.toFixed(3)??''}` : ' (데이터 적어서 검증 생략)';
       trainStatus.textContent = `epoch ${epoch+1}/${EPOCHS} — loss ${logs.loss.toFixed(3)}, acc ${logs.acc?.toFixed(3)??''}${valPart}`;
+
+      if(useValidation && logs.val_loss !== undefined){
+        if(logs.val_loss < bestValLoss){
+          bestValLoss = logs.val_loss;
+          bestWeights = headModel.getWeights().map(w => w.clone());
+          patienceCount = 0;
+        } else {
+          patienceCount++;
+          if(patienceCount >= PATIENCE){
+            headModel.stopTraining = true;
+            trainStatus.textContent += `\n검증 손실이 ${PATIENCE}번 연속 개선되지 않아 epoch ${epoch+1}에서 조기 종료함.`;
+          }
+        }
+      }
     }}
   });
+  if(bestWeights){
+    headModel.setWeights(bestWeights);
+    bestWeights.forEach(w => w.dispose());
+    trainStatus.textContent += '\n가장 좋았던 시점(검증 손실 최소)의 가중치로 복원함.';
+  }
+
+  // 확신도 보정(temperature scaling): 검증셋에 대해 여러 T값을 시도해서
+  // 음의 로그우도(NLL)가 가장 낮아지는 T를 찾음. p^(1/T) 정규화는 softmax(logit/T)와 수학적으로 동일해서
+  // 모델 구조를 안 바꾸고도 출력 확률만 후처리로 부드럽게 만들 수 있음.
+  window._temperature = 1.0;
+  if(useValidation){
+    const valPred = headModel.predict(xValTensor);
+    const valProbs = await valPred.array();
+    valPred.dispose();
+    let bestT = 1.0, bestNLL = Infinity;
+    for(let T=1.0; T<=6.0; T+=0.25){
+      let nll = 0;
+      for(let i=0;i<valProbs.length;i++){
+        const p = valProbs[i];
+        const powR = Math.pow(Math.max(p[0],1e-8), 1/T), powA = Math.pow(Math.max(p[1],1e-8), 1/T);
+        const sum = powR+powA;
+        const trueIdx = yValArr[i][0]===1 ? 0 : 1;
+        const pTrue = (trueIdx===0? powR: powA)/sum;
+        nll += -Math.log(Math.max(pTrue, 1e-8));
+      }
+      if(nll < bestNLL){ bestNLL = nll; bestT = T; }
+    }
+    window._temperature = bestT;
+    trainStatus.textContent += `\n확신도 보정값(temperature) = ${bestT.toFixed(2)} (1.0이면 보정 없음, 클수록 출력을 더 부드럽게 만듦)`;
+    xValTensor.dispose(); yValTensor.dispose();
+  }
+
   trainProgressTrack.style.display = 'none';
   xTensor.dispose(); yTensor.dispose();
   trainStatus.textContent += '\n학습 완료.';
@@ -509,7 +582,8 @@ btnTrain.onclick = async ()=>{
     names: HEURISTIC_NAMES,
     realMean: meanVec(refs.real.map(r=>r.heuristic)),
     aiMean: meanVec(refs.ai.map(r=>r.heuristic)),
-    min: hMin, max: hMax
+    min: hMin, max: hMax,
+    temperature: window._temperature || 1.0
   };
 
   document.getElementById('btnDeploy').disabled = false;
