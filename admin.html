@@ -408,7 +408,7 @@ async function addNewFiles(fileList, cls){
       const emb = await embedImgEl(img);
       const heur = extractHeuristicFeatures(img);
       const thumb = makeThumb(img);
-      refs[cls].push({ embedding: emb, heuristic: heur, thumb });
+      refs[cls].push({ embedding: emb, heuristic: heur, thumb, isNew: true });
       logLine(regLog, `특징값 추출: ${file.name}`);
     }catch(err){
       logLine(regLog, `실패: ${file.name} — ${err.message}`, true);
@@ -431,17 +431,33 @@ document.getElementById('fileAi').onchange = (e)=> addNewFiles(e.target.files, '
 document.getElementById('btnSaveDataset').onclick = async ()=>{
   const { owner, repo, token, branch } = creds();
   if(!token){ regStatus.textContent = '토큰을 먼저 입력해주세요.'; return; }
-  regStatus.textContent = '특징값 저장 중...';
+  regStatus.textContent = '리포의 최신 데이터 확인 중...';
   try{
+    // 저장 직전에 리포의 최신 상태를 다시 받아와서, 로컬에서 새로 추가한 사진만 그 위에 얹음
+    // (불러오기를 깜빡했거나 다른 곳에서 먼저 저장해둔 내용이 있어도 덮어써서 날리지 않도록)
+    const remoteReal = (await ghGetJson(owner, repo, 'dataset/real.json', token, branch)) || [];
+    const remoteAi = (await ghGetJson(owner, repo, 'dataset/fake.json', token, branch)) || [];
+    const newReal = refs.real.filter(r=> r.isNew);
+    const newAi = refs.ai.filter(r=> r.isNew);
+
+    const mergedReal = remoteReal.concat(newReal.map(r=>({ embedding:r.embedding, heuristic:r.heuristic, thumb:r.thumb })));
+    const mergedAi = remoteAi.concat(newAi.map(r=>({ embedding:r.embedding, heuristic:r.heuristic, thumb:r.thumb })));
+
+    regStatus.textContent = '특징값 저장 중...';
     const shaReal = await ghGetSha(owner, repo, 'dataset/real.json', token, branch);
-    const realBase64 = btoa(unescape(encodeURIComponent(JSON.stringify(refs.real))));
+    const realBase64 = btoa(unescape(encodeURIComponent(JSON.stringify(mergedReal))));
     await ghPutFile(owner, repo, 'dataset/real.json', realBase64, token, branch, shaReal);
 
     const shaAi = await ghGetSha(owner, repo, 'dataset/fake.json', token, branch);
-    const aiBase64 = btoa(unescape(encodeURIComponent(JSON.stringify(refs.ai))));
+    const aiBase64 = btoa(unescape(encodeURIComponent(JSON.stringify(mergedAi))));
     await ghPutFile(owner, repo, 'dataset/fake.json', aiBase64, token, branch, shaAi);
 
-    regStatus.textContent = `저장 완료 (real ${refs.real.length}장, ai ${refs.ai.length}장 — 특징값만, 용량 매우 작음).`;
+    // 저장 성공했으니 화면 상태도 "리포와 동기화된 전체 목록"으로 갱신 (새로 추가됨 표시는 해제)
+    refs.real = mergedReal;
+    refs.ai = mergedAi;
+    updateCounts();
+
+    regStatus.textContent = `저장 완료 (새로 추가 real ${newReal.length}장 / ai ${newAi.length}장, 전체 real ${mergedReal.length}장 / ai ${mergedAi.length}장 — 특징값만, 용량 매우 작음).`;
   }catch(err){
     regStatus.textContent = '저장 실패: ' + err.message;
   }
