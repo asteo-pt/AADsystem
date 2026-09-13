@@ -108,7 +108,7 @@ let headModel = null;
 
 async function ensureMobilenet(){
   if(mobilenetModel) return mobilenetModel;
-  mobilenetModel = await mobilenet.load({version:1, alpha:0.5});
+  mobilenetModel = await mobilenet.load({version:2, alpha:1.0});
   return mobilenetModel;
 }
 
@@ -133,15 +133,18 @@ async function embedImage(img){
 // 관리자가 배포한 기준 통계와 비교해서 항목별로 어느 쪽에 가까운지 보여줌
 let featureStats = null;
 function extractHeuristicFeatures(imgEl){
-  const SIZE = 512;
+  // 정사각형으로 억지로 자르지 않고 원본 가로세로 비율을 그대로 유지.
+  // 너무 큰 사진(요즘 카메라는 수천px)은 CAP까지만 축소 — 그 이하 사진은 원본 그대로 사용.
+  const CAP = 2048;
+  const scale = Math.min(1, CAP / Math.max(imgEl.width, imgEl.height));
+  const W = Math.max(1, Math.round(imgEl.width * scale));
+  const H = Math.max(1, Math.round(imgEl.height * scale));
   const cv = document.createElement('canvas');
-  cv.width = SIZE; cv.height = SIZE;
+  cv.width = W; cv.height = H;
   const ctx = cv.getContext('2d');
-  const s = Math.max(SIZE/imgEl.width, SIZE/imgEl.height);
-  const w = imgEl.width*s, h = imgEl.height*s;
-  ctx.drawImage(imgEl, (SIZE-w)/2, (SIZE-h)/2, w, h);
-  const data = ctx.getImageData(0,0,SIZE,SIZE).data;
-  const n = SIZE*SIZE;
+  ctx.drawImage(imgEl, 0, 0, W, H);
+  const data = ctx.getImageData(0,0,W,H).data;
+  const n = W*H;
   const gray = new Float32Array(n), sat = new Float32Array(n);
   for(let i=0;i<n;i++){
     const r=data[i*4], g=data[i*4+1], b=data[i*4+2];
@@ -162,48 +165,51 @@ function extractHeuristicFeatures(imgEl){
 
   let edgeSum=0, edgeN=0;
   const gxK=[-1,0,1,-2,0,2,-1,0,1], gyK=[-1,-2,-1,0,0,0,1,2,1];
-  for(let y=1;y<SIZE-1;y++){
-    for(let x=1;x<SIZE-1;x++){
+  for(let y=1;y<H-1;y++){
+    for(let x=1;x<W-1;x++){
       let gx=0,gy=0,k=0;
       for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
-        const v = gray[(y+dy)*SIZE+(x+dx)]; gx+=v*gxK[k]; gy+=v*gyK[k]; k++;
+        const v = gray[(y+dy)*W+(x+dx)]; gx+=v*gxK[k]; gy+=v*gyK[k]; k++;
       }
       const mag = Math.sqrt(gx*gx+gy*gy);
-      if(gray[y*SIZE+x] > threshold){ edgeSum+=mag; edgeN++; }
+      if(gray[y*W+x] > threshold){ edgeSum+=mag; edgeN++; }
     }
   }
   const detailScore = edgeN ? edgeSum/edgeN : 0;
 
   let symSum=0, symN=0; const R=4;
-  for(let y=R+1;y<SIZE-R-1 && symN<=40;y+=2){
-    for(let x=R+1;x<SIZE-R-1 && symN<=40;x+=2){
-      const v = gray[y*SIZE+x];
+  for(let y=R+1;y<H-R-1 && symN<=40;y+=2){
+    for(let x=R+1;x<W-R-1 && symN<=40;x+=2){
+      const v = gray[y*W+x];
       if(v<200) continue;
       let isPeak=true;
       for(let dy=-1;dy<=1&&isPeak;dy++) for(let dx=-1;dx<=1;dx++){
         if(dx===0&&dy===0) continue;
-        if(gray[(y+dy)*SIZE+(x+dx)]>v){ isPeak=false; break; }
+        if(gray[(y+dy)*W+(x+dx)]>v){ isPeak=false; break; }
       }
       if(!isPeak) continue;
-      const a=gray[y*SIZE+(x-R)], b2=gray[y*SIZE+(x+R)];
-      const c1=gray[(y-R)*SIZE+x], d1=gray[(y+R)*SIZE+x];
+      const a=gray[y*W+(x-R)], b2=gray[y*W+(x+R)];
+      const c1=gray[(y-R)*W+x], d1=gray[(y+R)*W+x];
       const sym = 1 - Math.min(1,(Math.abs(a-b2)+Math.abs(c1-d1))/2/255);
       symSum+=sym; symN++;
     }
   }
   const starScore = symN ? symSum/symN : 0.5;
 
+  // 패턴노이즈(고주파 잔차): 3x3 박스블러한 버전과 원본을 픽셀별로 빼서
+  // 남는 고주파 성분의 표준편차를 봄 — 포렌식 이미지 분석에서 쓰는 잔차 노이즈 기법
+  // 원본 비율 그대로, 캔버스 안의 모든 픽셀을 하나씩 순회해서 계산함
   const blurred = new Float32Array(n);
-  for(let y=0;y<SIZE;y++){
-    for(let x=0;x<SIZE;x++){
+  for(let y=0;y<H;y++){
+    for(let x=0;x<W;x++){
       let sum=0, cnt=0;
       for(let dy=-1;dy<=1;dy++){
         for(let dx=-1;dx<=1;dx++){
           const yy=y+dy, xx=x+dx;
-          if(yy>=0&&yy<SIZE&&xx>=0&&xx<SIZE){ sum+=gray[yy*SIZE+xx]; cnt++; }
+          if(yy>=0&&yy<H&&xx>=0&&xx<W){ sum+=gray[yy*W+xx]; cnt++; }
         }
       }
-      blurred[y*SIZE+x] = sum/cnt;
+      blurred[y*W+x] = sum/cnt;
     }
   }
   let resSum=0, resSqSum=0;
@@ -264,11 +270,16 @@ btnRun.onclick = async ()=>{
     const file = testFiles[i];
     const img = await loadImageFile(file);
     const emb = await embedImage(img);
-    const x = tf.tensor2d([emb]);
-    const pred = headModel.predict(x);
-    const [pReal, pAi] = await pred.data();
-    x.dispose(); pred.dispose();
     const heur = extractHeuristicFeatures(img);
+    const x = tf.tensor2d([[...emb, ...heur]]);
+    const pred = headModel.predict(x);
+    const [pRealRaw, pAiRaw] = await pred.data();
+    x.dispose(); pred.dispose();
+    // 확신도 보정(temperature scaling) — 학습 때 찾아둔 T로 출력을 부드럽게 만듦
+    const T = (featureStats && featureStats.temperature) || 1.0;
+    const powR = Math.pow(Math.max(pRealRaw,1e-8), 1/T), powA = Math.pow(Math.max(pAiRaw,1e-8), 1/T);
+    const calSum = powR+powA;
+    const pAi = powA/calSum;
     scored.push({ name:file.name, url:URL.createObjectURL(file), pAi, heur });
     progressFill.style.width = Math.round(((i+1)/testFiles.length)*100)+'%';
     runStatus.textContent = `판별 중... ${i+1}/${testFiles.length}`;
